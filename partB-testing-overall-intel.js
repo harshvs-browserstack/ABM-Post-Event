@@ -2381,7 +2381,7 @@ function callGeminiBatchClassification(prompt, apiKey) {
 function mapParticipantEmails() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const attendanceSheet = ss.getSheetByName("Attendance");
-  const targetSheet = ss.getActiveSheet(); 
+  const targetSheet = ss.getActiveSheet();
 
   if (!attendanceSheet) {
     SpreadsheetApp.getUi().alert("Error: 'Attendance' sheet not found.");
@@ -2391,89 +2391,125 @@ function mapParticipantEmails() {
   const attendanceData = attendanceSheet.getDataRange().getValues();
   const targetData = targetSheet.getDataRange().getValues();
 
-  // Map Attendance Data: Full Name (0), First (1), Last (2), Email (3), Company (7)
+  // Map Attendance Data (source of truth): Full Name (0), First (1), Last (2), Email (3), Company (7)
   const attendanceMap = attendanceData.slice(1).map(row => ({
     fullName: String(row[0] || "").toLowerCase().trim(),
     firstName: String(row[1] || "").toLowerCase().trim(),
     lastName: String(row[2] || "").toLowerCase().trim(),
-    email: row[3] || "",
-    company: String(row[7] || "").toLowerCase().trim()
-  }));
+    email: String(row[3] || "").trim(),
+    company: normalizeCompanyName(String(row[7] || ""))
+  })).filter(a => a.email); // Only keep rows with emails
 
   const results = [];
-  const fuzzyMatchRows = []; // To track which rows need highlighting
+  const fuzzyMatchRows = [];
+  const notFoundRows = [];
 
-  // Loop through target sheet rows
+  // Loop through target sheet rows (Slido data)
   for (let i = 1; i < targetData.length; i++) {
     let tRow = targetData[i];
     let tName = String(tRow[1] || "").toLowerCase().trim();
-    let tCompany = String(tRow[5] || "").toLowerCase().trim();
-    
+    let tCompany = normalizeCompanyName(String(tRow[5] || ""));
+
+    if (!tName) {
+      results.push([""]); // Skip empty rows
+      continue;
+    }
+
     let matchedEmail = "";
-    let matchType = "none";
+    let isFuzzy = false;
 
-    // Tier 1: Exact Name + Exact Company
+    // STAGE 1: Exact full name + exact company
     let match = attendanceMap.find(a => a.fullName === tName && a.company === tCompany && tCompany !== "");
-    if (match) matchType = "exact";
 
-    // Tier 2: Exact Name Only
+    // STAGE 2: Exact full name only
     if (!match) {
-      match = attendanceMap.find(a => a.fullName === tName);
-      if (match) matchType = "exact";
+      match = attendanceMap.find(a => a.fullName === tName && a.email);
     }
 
-    // Tier 3: Abbreviation Match
+    // STAGE 3: Parse name into tokens and match first + last
     if (!match) {
+      const nameTokens = tName.split(/\s+/).filter(t => t.length > 0);
+      if (nameTokens.length >= 2) {
+        const first = nameTokens[0];
+        const last = nameTokens[nameTokens.length - 1];
+        match = attendanceMap.find(a => a.firstName === first && a.lastName === last);
+      }
+    }
+
+    // STAGE 4: First name + exact company
+    if (!match && tCompany) {
+      const firstName = tName.split(/\s+/)[0];
+      match = attendanceMap.find(a => a.firstName === firstName && a.company === tCompany);
+    }
+
+    // STAGE 5: Token-based matching (any name token matches any attendance token)
+    if (!match) {
+      const tTokens = tName.split(/\s+/).filter(t => t.length > 0);
       match = attendanceMap.find(a => {
-        const isAbbr = (tName.includes(a.lastName) && tName.includes(a.firstName.charAt(0))) || 
-                       (tName.includes(a.firstName) && tName.includes(a.lastName.charAt(0)));
-        return isAbbr && (a.company === tCompany || tCompany === "");
+        const aTokens = a.fullName.split(/\s+/).filter(t => t.length > 0);
+        // At least one token must match closely (Jaro-Winkler >= 0.85)
+        return tTokens.some(tToken =>
+          aTokens.some(aToken => jaroWinklerSimilarity(tToken, aToken) >= 0.85)
+        ) && (!tCompany || jaroWinklerSimilarity(tCompany, a.company) >= 0.6);
       });
-      if (match) matchType = "exact";
     }
 
-    // Tier 4: First Name + Company
+    // STAGE 6: Jaro-Winkler fuzzy match on name + company (relaxed threshold)
     if (!match) {
-      match = attendanceMap.find(a => a.firstName === tName.split(" ")[0] && a.company === tCompany && tCompany !== "");
-      if (match) matchType = "exact";
+      let bestMatch = null;
+      let bestScore = 0;
+
+      attendanceMap.forEach(a => {
+        const nameScore = jaroWinklerSimilarity(tName, a.fullName);
+        const companyScore = tCompany ? jaroWinklerSimilarity(tCompany, a.company) : 0;
+        const combinedScore = (nameScore * 0.7) + (companyScore * 0.3);
+
+        if (combinedScore > bestScore) {
+          bestScore = combinedScore;
+          bestMatch = a;
+        }
+      });
+
+      if (bestMatch && bestScore >= 0.60) {
+        match = bestMatch;
+        isFuzzy = true;
+      }
     }
 
-    // Tier 5: Fuzzy / AI Fallback
-    if (!match) {
-      matchedEmail = runFuzzyMatch(tName, tCompany, attendanceMap);
-      if (matchedEmail && matchedEmail !== "NEEDS REVIEW") {
-        matchType = "fuzzy";
-        fuzzyMatchRows.push(i + 1); // Store row number for highlighting
-      } else {
-        matchedEmail = "NEEDS REVIEW";
+    if (match) {
+      matchedEmail = match.email;
+      if (isFuzzy) {
+        fuzzyMatchRows.push(i + 1);
       }
     } else {
-      matchedEmail = match.email;
+      matchedEmail = "";
+      notFoundRows.push(i + 1);
     }
-    
+
     results.push([matchedEmail]);
   }
 
-  // 1. Clear old highlighting in the Email Column (Column C)
-  targetSheet.getRange(2, 3, targetData.length, 1).setBackground(null);
+  // 1. Clear old highlighting in the Email Column (Column C, starting from row 2)
+  targetSheet.getRange(2, 3, targetData.length - 1, 1).setBackground(null);
 
   // 2. Write the emails
-  const emailRange = targetSheet.getRange(2, 3, results.length, 1);
-  emailRange.setValues(results);
+  if (results.length > 0) {
+    const emailRange = targetSheet.getRange(2, 3, results.length, 1);
+    emailRange.setValues(results);
+  }
 
   // 3. Highlight Fuzzy Matches in Yellow
   fuzzyMatchRows.forEach(rowNum => {
-    targetSheet.getRange(rowNum, 3).setBackground("#FFF2CC"); // Light Yellow
+    targetSheet.getRange(rowNum, 3).setBackground("#FFF2CC");
   });
 
-  // 4. Highlight "NEEDS REVIEW" in Red
-  results.forEach((res, idx) => {
-    if (res[0] === "NEEDS REVIEW") {
-      targetSheet.getRange(idx + 2, 3).setBackground("#F4CCCC"); // Light Red
-    }
+  // 4. Highlight Not Found in Red
+  notFoundRows.forEach(rowNum => {
+    targetSheet.getRange(rowNum, 3).setBackground("#F4CCCC");
   });
 
-  SpreadsheetApp.getUi().alert("Mapping complete. Yellow cells are fuzzy matches; Red cells need manual review.");
+  const message = `Mapping complete.\n✅ Exact: ${results.length - fuzzyMatchRows.length - notFoundRows.length}\n⚠️ Fuzzy (yellow): ${fuzzyMatchRows.length}\n❌ Not Found (red): ${notFoundRows.length}`;
+  SpreadsheetApp.getUi().alert(message);
 }
 
 /**
@@ -2539,7 +2575,7 @@ function jaroWinklerSimilarity(a, b) {
 
 /**
  * Fuzzy match using Jaro-Winkler for names and substring for company
- * Returns best email match or "NEEDS REVIEW"
+ * Returns best email match found (even if low confidence)
  */
 function runFuzzyMatch(targetName, targetCompany, attendanceList) {
   let bestMatch = null;
@@ -2571,7 +2607,7 @@ function runFuzzyMatch(targetName, targetCompany, attendanceList) {
     // Weighted score: name is 70%, company is 30% (names are more reliable)
     const combinedScore = (nameScore * 0.7) + (companyScore * 0.3);
 
-    if (combinedScore > highestScore && combinedScore >= 0.75) {
+    if (combinedScore > highestScore) {
       highestScore = combinedScore;
       bestMatch = person.email;
     }

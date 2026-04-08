@@ -2477,24 +2477,105 @@ function mapParticipantEmails() {
 }
 
 /**
- * Simple Fuzzy Match logic to act as the "AI" fallback
+ * Jaro-Winkler similarity: 0-1 score (1 = identical, 0 = no similarity)
+ * Better than raw Levenshtein for short strings (names) and typos
+ */
+function jaroWinklerSimilarity(a, b) {
+  const aLower = String(a || '').toLowerCase().trim();
+  const bLower = String(b || '').toLowerCase().trim();
+
+  if (aLower === bLower) return 1;
+  if (!aLower || !bLower) return 0;
+
+  const aLen = aLower.length;
+  const bLen = bLower.length;
+  const maxLen = Math.max(aLen, bLen);
+
+  // Jaro distance: matching chars within (maxLen/2 - 1) window
+  const matchWindow = Math.floor(maxLen / 2) - 1;
+  const aMatched = new Array(aLen);
+  const bMatched = new Array(bLen);
+  let matches = 0;
+  let transpositions = 0;
+
+  // Find matches
+  for (let i = 0; i < aLen; i++) {
+    const start = Math.max(0, i - matchWindow);
+    const end = Math.min(i + matchWindow + 1, bLen);
+    for (let j = start; j < end; j++) {
+      if (bMatched[j] || aLower[i] !== bLower[j]) continue;
+      aMatched[i] = true;
+      bMatched[j] = true;
+      matches++;
+      break;
+    }
+  }
+
+  if (matches === 0) return 0;
+
+  // Count transpositions
+  let k = 0;
+  for (let i = 0; i < aLen; i++) {
+    if (!aMatched[i]) continue;
+    while (!bMatched[k]) k++;
+    if (aLower[i] !== bLower[k]) transpositions++;
+    k++;
+  }
+
+  const jaro = (matches / aLen +
+                matches / bLen +
+                (matches - transpositions / 2) / matches) / 3;
+
+  // Jaro-Winkler: boost score if strings share a common prefix (up to 4 chars)
+  let prefix = 0;
+  for (let i = 0; i < Math.min(4, aLen, bLen); i++) {
+    if (aLower[i] === bLower[i]) prefix++;
+    else break;
+  }
+
+  const p = 0.1; // Scaling factor (standard is 0.1)
+  return jaro + prefix * p * (1 - jaro);
+}
+
+/**
+ * Fuzzy match using Jaro-Winkler for names and substring for company
+ * Returns best email match or "NEEDS REVIEW"
  */
 function runFuzzyMatch(targetName, targetCompany, attendanceList) {
-  // If you have a Gemini API key, you could call it here. 
-  // Otherwise, we use a basic similarity score.
   let bestMatch = null;
   let highestScore = 0;
 
   attendanceList.forEach(person => {
-    let score = 0;
-    if (targetName.includes(person.lastName)) score += 0.5;
-    if (targetCompany && person.company.includes(targetCompany)) score += 0.4;
-    
-    if (score > highestScore && score > 0.6) {
-      highestScore = score;
+    // Name similarity (Jaro-Winkler): first name, last name, or full name
+    const firstNameScore = jaroWinklerSimilarity(targetName, person.firstName);
+    const lastNameScore = jaroWinklerSimilarity(targetName, person.lastName);
+    const fullNameScore = jaroWinklerSimilarity(targetName, person.fullName);
+    const nameScore = Math.max(firstNameScore, lastNameScore, fullNameScore);
+
+    // Company similarity: substring match (company names vary widely)
+    let companyScore = 0;
+    if (targetCompany && person.company) {
+      const normTarget = targetCompany.toLowerCase().replace(/[^\w]/g, '');
+      const normPerson = person.company.toLowerCase().replace(/[^\w]/g, '');
+      if (normTarget && normPerson) {
+        if (normTarget === normPerson) {
+          companyScore = 1;
+        } else if (normPerson.includes(normTarget) || normTarget.includes(normPerson)) {
+          companyScore = 0.8;
+        } else {
+          companyScore = jaroWinklerSimilarity(normTarget, normPerson);
+        }
+      }
+    }
+
+    // Weighted score: name is 70%, company is 30% (names are more reliable)
+    const combinedScore = (nameScore * 0.7) + (companyScore * 0.3);
+
+    if (combinedScore > highestScore && combinedScore >= 0.75) {
+      highestScore = combinedScore;
       bestMatch = person.email;
     }
   });
 
-  return bestMatch || "MANUAL CHECK REQUIRED";
+  return bestMatch || "NEEDS REVIEW";
 }

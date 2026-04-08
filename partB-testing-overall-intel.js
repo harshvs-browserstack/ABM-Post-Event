@@ -21,41 +21,6 @@ const GEMINI_ENDPOINT_SUMMARY =
   ':generateContent';
 
 // ---------------------------------------------------------------------------
-// BrowserStack Product & Industry Glossary (injected into Gemini prompts)
-// ---------------------------------------------------------------------------
-
-const BROWSERSTACK_GLOSSARY =
-  '## BROWSERSTACK PRODUCT & INDUSTRY GLOSSARY\n' +
-  'When you encounter these terms, preserve them VERBATIM in summaries and note their significance:\n\n' +
-  '### BrowserStack Products\n' +
-  '- LCA / Low Code Automation: BrowserStack\'s no-code/low-code test automation product\n' +
-  '- TCM / Test Case Management / TM / Test Management: BrowserStack\'s test management product\n' +
-  '- Percy: BrowserStack\'s visual regression testing tool\n' +
-  '- Automate: BrowserStack\'s Selenium-based cloud automation platform\n' +
-  '- App Automate: BrowserStack\'s mobile app testing platform\n' +
-  '- Live: BrowserStack\'s manual cross-browser testing product\n' +
-  '- A11y / Accessibility: BrowserStack\'s accessibility testing product\n' +
-  '- Observability / Test Observability: BrowserStack\'s test analytics and debugging product\n' +
-  '- App Live: Manual testing on real mobile devices\n\n' +
-  '### Competitor Products (important competitive intel)\n' +
-  '- Sauce Labs, LambdaTest, Katalon, Selenium Grid, Cypress, Playwright, Appium\n' +
-  '- Zephyr, TestRail, qTest, PractiTest (test management competitors)\n' +
-  '- Applitools (visual testing competitor to Percy)\n' +
-  '- HeadSpin, Perfecto, Kobiton (mobile testing competitors)\n\n' +
-  '### Testing Industry Terms\n' +
-  '- POC: Proof of Concept (trial/evaluation)\n' +
-  '- Regression: Repeated test suite run to detect regressions\n' +
-  '- CI/CD: Continuous Integration/Delivery pipeline\n' +
-  '- Flaky tests: Tests that pass/fail inconsistently\n' +
-  '- Shift-left: Moving testing earlier in development\n' +
-  '- AI agents: AI-powered test generation/maintenance\n\n' +
-  'CRITICAL: When a lead mentions ANY of these terms, include the EXACT term in the summary. ' +
-  'For example, if someone says "interested in LCA", write "Interested in LCA (Low Code Automation)" in the summary.\n\n';
-
-// Expanded keyword whitelist for noise filter — short messages containing these are preserved
-const INTEL_KEYWORDS_REGEX = /(interested|demo|lca|tcm|tm|a11y|percy|ai|automate|sauce|lambdatest|katalon|selenium|cypress|playwright|zephyr|testrail|applitools|observability|poc|regression|flaky|live|app\s?automate|shift.?left|visual\s?test)/i;
-
-// ---------------------------------------------------------------------------
 // Menu
 // ---------------------------------------------------------------------------
 
@@ -70,7 +35,6 @@ function onOpen() {
     .addItem('Qualify Leads (Batch)', 'batchQualifyLeads')
     .addSeparator()
     .addItem('🔄 Retry Failed Messages', 'retryFailedMessages')
-    .addItem('🔍 Auto-Match Unmatched Leads', 'autoMatchUnmatchedLeads')
     .addToUi();
 
   // Your new Participant Tools menu
@@ -272,29 +236,19 @@ function buildSlackSummaryFromTranscript() {
   console.log(`Grouped messages into ${Object.keys(messagesBySPOC).length} SPOCs`);
 
   // 6) Call Gemini ONCE PER SPOC with all their messages (with tracking)
-  const result = buildSlackSummaryBySPOC(roster, messagesBySPOC, messageLog);
-  const summaryRows = result.rows;
-  const quarantineRows = result.quarantine;
+  const summaryRows = buildSlackSummaryBySPOC(roster, messagesBySPOC, messageLog);
 
   // 7) Write Slack Summary tab
   writeSlackSummarySheet(ss, summaryRows);
 
-  // 8) Write quarantine sheet for unmatched leads
-  if (quarantineRows && quarantineRows.length > 0) {
-    writeQuarantineSheet(ss, quarantineRows, roster);
-  }
-
-  // 9) Write processing results back to transcript sheet
+  // 8) Write processing results back to transcript sheet
   writeProcessingResultsToTranscript(ss, transcriptSheet, messageLog);
 
-  // 10) Generate processing report
+  // 9) Generate processing report
   generateProcessingReport(ss, messageLog, originalSPOCs.size, Object.keys(messagesBySPOC).length);
 
-  const quarantineMsg = quarantineRows.length > 0
-    ? ` ${quarantineRows.length} unmatched leads in "Unmatched Leads" sheet.`
-    : '';
   SpreadsheetApp.getActive().toast(
-    `Slack Summary built with ${summaryRows.length} rows from ${Object.keys(messagesBySPOC).length} SPOCs.${quarantineMsg} Check transcript for details.`,
+    `Slack Summary built with ${summaryRows.length} rows from ${Object.keys(messagesBySPOC).length} SPOCs. Check transcript for details.`,
     'Slack Summary',
     8
   );
@@ -337,7 +291,7 @@ function getNoiseReason(msg) {
     return 'Pure acknowledgment/greeting';
   }
 
-  if (trimmedText.length < 10 && !INTEL_KEYWORDS_REGEX.test(trimmedText)) {
+  if (trimmedText.length < 10 && !/(interested|demo|lca|tcm|tm|a11y|percy|ai|automate)/i.test(trimmedText)) {
     return `Too short (${trimmedText.length} chars) with no intel keywords`;
   }
 
@@ -377,8 +331,8 @@ function isNoisyMessage(msg) {
 
   const pureChatter = /^(thanks?|thank you|noted|sure|okay|ok|will do|sounds good|got it)$/i.test(trimmedText);
   
-  const isMeaninglessShort = trimmedText.length < 10 &&
-    !INTEL_KEYWORDS_REGEX.test(trimmedText);
+  const isMeaninglessShort = trimmedText.length < 10 && 
+    !/(interested|demo|lca|tcm|tm|a11y|percy|ai|automate)/i.test(trimmedText);
 
   return isSystemNoise || pureChatter || isMeaninglessShort;
 }
@@ -423,7 +377,6 @@ function buildSlackSummaryBySPOC(roster, messagesBySPOC, messageLog) {
   const seen = {};
   const failedSPOCs = [];
   const hallucinatedSPOCs = [];
-  var quarantineRows = [];
   
   const spocList = Object.keys(messagesBySPOC);
   let processedCount = 0;
@@ -598,10 +551,11 @@ function buildSlackSummaryBySPOC(roster, messagesBySPOC, messageLog) {
     let spocLeadCount = 0;
     let hallucinatedCount = 0;
     let validCount = 0;
+    let enrichedCount = 0;
     let fuzzyCount = 0;
 
     parsed.forEach(function (entry) {
-      // Ignore any email from Gemini — resolve deterministically
+      let email = String(entry.email || '').trim();
       const firstName = String(entry.first_name || '').trim();
       const lastName = String(entry.last_name || '').trim();
       const account = String(entry.account || '').trim();
@@ -610,7 +564,7 @@ function buildSlackSummaryBySPOC(roster, messagesBySPOC, messageLog) {
       const spocFromEntry = String(entry.spoc || spoc).trim();
 
       if (!summary) return;
-
+      
       // Initialize extraction tracking for this timestamp
       if (!extractionsByTs[ts]) {
         extractionsByTs[ts] = {
@@ -620,47 +574,53 @@ function buildSlackSummaryBySPOC(roster, messagesBySPOC, messageLog) {
         };
       }
 
-      // DETERMINISTIC EMAIL RESOLUTION: match against roster using name+account only
+      let wasEnriched = false;
+      
+      // ENRICHMENT: Fill in missing email from roster
+      if (!email && firstName && account) {
+        const lookupKey = firstName.toLowerCase() + '|' + account.toLowerCase();
+        const matches = rosterByNameAccount[lookupKey];
+        if (matches && matches.length > 0) {
+          email = matches[0].email;
+          wasEnriched = true;
+          enrichedCount++;
+          extractionsByTs[ts].warnings.push(`✏️ Enriched: Email filled from roster for ${firstName} ${account}`);
+          console.log(`SPOC ${spoc}: Enriched email for ${firstName} ${account} → ${email}`);
+        }
+      }
+
       const rosterMatchResult = findRosterMatchWithStage(entry, roster);
 
       if (!rosterMatchResult.match) {
         console.warn(
           `SPOC ${spoc}: No roster match:`,
-          firstName, lastName, account
+          firstName, lastName, email, account
         );
         hallucinatedCount++;
-        extractionsByTs[ts].warnings.push(`❌ Unmatched: ${firstName} ${lastName} from ${account} (no roster match)`);
-        extractionsByTs[ts].matchQuality.push('Unmatched');
-
-        // Collect for quarantine instead of silently dropping
-        quarantineRows.push({
-          first_name: firstName,
-          last_name: lastName,
-          account: account,
-          summary: summary,
-          spoc: spocFromEntry || spoc,
-          ts: ts
-        });
+        extractionsByTs[ts].warnings.push(`❌ Hallucinated: ${firstName} ${lastName} from ${account} (no roster match)`);
+        extractionsByTs[ts].matchQuality.push('Hallucinated');
         return;
       }
 
       const rosterMatch = rosterMatchResult.match;
       const matchStage = rosterMatchResult.stage;
-      const email = rosterMatch.email || '';
-
+      
       validCount++;
 
-      // Track match quality by stage
-      if (matchStage >= 6) {
+      // Track match quality
+      if (matchStage >= 4) {
         fuzzyCount++;
         extractionsByTs[ts].warnings.push(`⚠️ Fuzzy Match: Stage ${matchStage} for ${firstName} ${account}`);
         extractionsByTs[ts].matchQuality.push('Fuzzy');
-      } else if (matchStage >= 4) {
-        fuzzyCount++;
-        extractionsByTs[ts].warnings.push(`⚠️ Loose Match: Stage ${matchStage} for ${firstName} ${account}`);
-        extractionsByTs[ts].matchQuality.push('Loose');
+      } else if (wasEnriched) {
+        extractionsByTs[ts].matchQuality.push('Enriched');
       } else {
         extractionsByTs[ts].matchQuality.push('Exact');
+      }
+
+      // Enrich with roster data if needed
+      if (!email && rosterMatch.email) {
+        email = rosterMatch.email;
       }
 
       // Ensure summary follows the standardized format
@@ -714,7 +674,7 @@ function buildSlackSummaryBySPOC(roster, messagesBySPOC, messageLog) {
       console.error(`🚨 SPOC ${spoc}: ALL ${parsed.length} Gemini entries were hallucinated/invalid!`);
     }
 
-    console.log(`SPOC ${spoc}: Extracted ${spocLeadCount} valid leads (${hallucinatedCount} unmatched, ${validCount} valid, ${fuzzyCount} fuzzy)`);
+    console.log(`SPOC ${spoc}: Extracted ${spocLeadCount} valid leads (${hallucinatedCount} hallucinated, ${validCount} valid, ${enrichedCount} enriched, ${fuzzyCount} fuzzy)`);
     
     // Rate limiting
     if (processedCount < spocList.length) {
@@ -760,12 +720,7 @@ function buildSlackSummaryBySPOC(roster, messagesBySPOC, messageLog) {
   console.log('='.repeat(70) + '\n');
 
   console.log(`Total leads extracted: ${allRows.length} from ${processedCount} SPOCs`);
-
-  if (quarantineRows.length > 0) {
-    console.log(`\n⚠️  ${quarantineRows.length} unmatched leads sent to quarantine sheet`);
-  }
-
-  return { rows: allRows, quarantine: quarantineRows };
+  return allRows;
 }
 
 /**
@@ -819,37 +774,10 @@ function findRosterMatchWithStage(entry, roster) {
   if (firstLower && accountLower && accountLower.length >= 4) {
     const fuzzyMatch = roster.find(function(r) {
       const rAccountLower = normalizeCompanyName(r.account);
-      return r.first_name.toLowerCase() === firstLower &&
+      return r.first_name.toLowerCase() === firstLower && 
              (rAccountLower.includes(accountLower) || accountLower.includes(rAccountLower));
     });
     if (fuzzyMatch) return { match: fuzzyMatch, stage: 5 };
-  }
-
-  // STAGE 6: Fuzzy first name (Levenshtein >= 0.75) + exact normalized company
-  if (firstLower && accountLower) {
-    const fuzzyNameMatch = roster.find(function(r) {
-      return nameSimilarity(firstLower, r.first_name.toLowerCase()) >= 0.75 &&
-             normalizeCompanyName(r.account) === accountLower;
-    });
-    if (fuzzyNameMatch) return { match: fuzzyNameMatch, stage: 6 };
-  }
-
-  // STAGE 7: Exact first name + fuzzy company (Levenshtein >= 0.7)
-  if (firstLower && accountLower && accountLower.length >= 3) {
-    const fuzzyCompanyMatch = roster.find(function(r) {
-      return r.first_name.toLowerCase() === firstLower &&
-             nameSimilarity(accountLower, normalizeCompanyName(r.account)) >= 0.7;
-    });
-    if (fuzzyCompanyMatch) return { match: fuzzyCompanyMatch, stage: 7 };
-  }
-
-  // STAGE 8: Fuzzy first name (>= 0.75) + fuzzy company (>= 0.7)
-  if (firstLower && accountLower && accountLower.length >= 3) {
-    const fuzzyBothMatch = roster.find(function(r) {
-      return nameSimilarity(firstLower, r.first_name.toLowerCase()) >= 0.75 &&
-             nameSimilarity(accountLower, normalizeCompanyName(r.account)) >= 0.7;
-    });
-    if (fuzzyBothMatch) return { match: fuzzyBothMatch, stage: 8 };
   }
 
   return { match: null, stage: 0 };
@@ -967,16 +895,16 @@ function generateProcessingReport(ss, messageLog, originalSPOCs, processedSPOCs)
     skipped: 0,
     withIntel: 0,
     totalExtractions: 0,
-    unmatched: 0,
+    hallucinated: 0,
     fuzzy: 0,
-    loose: 0,
+    enriched: 0,
     exact: 0
   };
-
+  
   Object.keys(messageLog).forEach(function(ts) {
     const log = messageLog[ts];
     stats.total++;
-
+    
     if (log.status.includes('Processed')) {
       stats.processed++;
       if (log.extractedCount > 0) {
@@ -992,13 +920,13 @@ function generateProcessingReport(ss, messageLog, originalSPOCs, processedSPOCs)
     } else if (log.status.includes('Skipped')) {
       stats.skipped++;
     }
-
+    
     // Count match quality
     if (log.matchQuality) {
       log.matchQuality.forEach(function(quality) {
-        if (quality === 'Unmatched') stats.unmatched++;
+        if (quality === 'Hallucinated') stats.hallucinated++;
         else if (quality === 'Fuzzy') stats.fuzzy++;
-        else if (quality === 'Loose') stats.loose++;
+        else if (quality === 'Enriched') stats.enriched++;
         else if (quality === 'Exact') stats.exact++;
       });
     }
@@ -1022,11 +950,11 @@ function generateProcessingReport(ss, messageLog, originalSPOCs, processedSPOCs)
     ['Total Intel Entries Extracted', stats.totalExtractions],
     ['Average Extractions per Message', stats.withIntel > 0 ? (stats.totalExtractions / stats.withIntel).toFixed(2) : 0],
     ['', ''],
-    ['=== MATCH QUALITY (Deterministic Roster Resolution) ===', ''],
-    ['Exact Matches (Stages 1-3)', stats.exact],
-    ['Loose Matches (Stages 4-5)', stats.loose],
-    ['Fuzzy Matches (Stages 6-8, Levenshtein)', stats.fuzzy],
-    ['Unmatched (Quarantined for Review)', stats.unmatched],
+    ['=== MATCH QUALITY ===', ''],
+    ['Exact Matches', stats.exact],
+    ['Enriched Matches', stats.enriched],
+    ['Fuzzy Matches', stats.fuzzy],
+    ['Hallucinated (Rejected)', stats.hallucinated],
     ['', ''],
     ['=== SPOC STATISTICS ===', ''],
     ['Original SPOCs in Transcript', originalSPOCs],
@@ -1043,241 +971,6 @@ function generateProcessingReport(ss, messageLog, originalSPOCs, processedSPOCs)
   reportSheet.setColumnWidth(2, 150);
   
   console.log('Processing report generated');
-}
-
-/**
- * Write unmatched leads to a quarantine sheet for manual review.
- * Each row includes the closest roster match suggestion and similarity score.
- */
-function writeQuarantineSheet(ss, quarantineRows, roster) {
-  if (!quarantineRows || quarantineRows.length === 0) return;
-
-  const sheetName = 'Unmatched Leads';
-  var sheet = ss.getSheetByName(sheetName);
-  if (!sheet) {
-    sheet = ss.insertSheet(sheetName);
-  } else {
-    sheet.clear();
-  }
-
-  var header = [
-    'First Name', 'Last Name', 'Account', 'Summary', 'SPOC', 'Timestamp',
-    'Closest Roster Match', 'Similarity Score', 'Suggested Email'
-  ];
-
-  var rows = [header];
-  quarantineRows.forEach(function(entry) {
-    var best = findBestFuzzyMatch(entry, roster);
-    var closestName = best.match
-      ? best.match.first_name + ' ' + best.match.last_name + ' (' + best.match.account + ')'
-      : 'No suggestion';
-    var suggestedEmail = best.match ? best.match.email : '';
-    var score = best.score ? best.score.toFixed(3) : '0';
-
-    rows.push([
-      entry.first_name || '',
-      entry.last_name || '',
-      entry.account || '',
-      entry.summary || '',
-      entry.spoc || '',
-      entry.ts || '',
-      closestName,
-      score,
-      suggestedEmail
-    ]);
-  });
-
-  sheet.getRange(1, 1, rows.length, header.length).setValues(rows);
-
-  // Format header
-  sheet.getRange(1, 1, 1, header.length).setFontWeight('bold');
-  sheet.setColumnWidth(4, 400); // Summary column
-  sheet.setColumnWidth(7, 250); // Closest match column
-
-  // Highlight all data rows red for review
-  if (rows.length > 1) {
-    sheet.getRange(2, 1, rows.length - 1, header.length).setBackground('#F4CCCC');
-  }
-
-  console.log(`Quarantine sheet written with ${quarantineRows.length} unmatched leads`);
-}
-
-/**
- * AUTO-MATCH UNMATCHED LEADS using Gemini as a second-pass matcher.
- * Reads the "Unmatched Leads" sheet, sends entries + roster to Gemini,
- * and writes suggestions back for manual approval.
- */
-function autoMatchUnmatchedLeads() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var unmatchedSheet = ss.getSheetByName('Unmatched Leads');
-
-  if (!unmatchedSheet) {
-    SpreadsheetApp.getActive().toast('No "Unmatched Leads" sheet found. Run Build Slack Summary first.', 'Auto-Match', 5);
-    return;
-  }
-
-  var range = unmatchedSheet.getDataRange();
-  var values = range.getValues();
-  if (values.length < 2) {
-    SpreadsheetApp.getActive().toast('No unmatched leads to process.', 'Auto-Match', 5);
-    return;
-  }
-
-  // Read roster from active sheet
-  var collatedSheet = ss.getActiveSheet();
-  var collatedValues = collatedSheet.getDataRange().getValues();
-  if (collatedValues.length < 2) {
-    SpreadsheetApp.getActive().toast('No roster data in active sheet.', 'Auto-Match', 5);
-    return;
-  }
-
-  var cHeader = collatedValues[0];
-  var cIdx = {
-    firstName: cHeader.indexOf('First Name'),
-    lastName: cHeader.indexOf('Last Name'),
-    email: cHeader.indexOf('Email'),
-    account: cHeader.indexOf('Account')
-  };
-
-  var roster = [];
-  for (var i = 1; i < collatedValues.length; i++) {
-    var row = collatedValues[i];
-    var fn = cIdx.firstName >= 0 ? String(row[cIdx.firstName]).trim() : '';
-    var ln = cIdx.lastName >= 0 ? String(row[cIdx.lastName]).trim() : '';
-    var em = cIdx.email >= 0 ? String(row[cIdx.email]).trim() : '';
-    var ac = cIdx.account >= 0 ? String(row[cIdx.account]).trim() : '';
-    if (fn || ln || em || ac) roster.push({ first_name: fn, last_name: ln, email: em, account: ac });
-  }
-
-  var apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
-  if (!apiKey) {
-    SpreadsheetApp.getActive().toast('GEMINI_API_KEY not set.', 'Auto-Match', 5);
-    return;
-  }
-
-  // Build entries from unmatched sheet
-  var header = values[0];
-  var entries = [];
-  for (var i = 1; i < values.length; i++) {
-    entries.push({
-      row: i,
-      first_name: String(values[i][0] || '').trim(),
-      last_name: String(values[i][1] || '').trim(),
-      account: String(values[i][2] || '').trim()
-    });
-  }
-
-  // Find or create "Gemini Suggestion" column
-  var sugColIdx = header.indexOf('Gemini Suggestion');
-  var confColIdx = header.indexOf('Gemini Confidence');
-  if (sugColIdx === -1) {
-    sugColIdx = header.length;
-    confColIdx = header.length + 1;
-    values[0].push('Gemini Suggestion', 'Gemini Confidence');
-  }
-
-  // Process in batches of 5
-  var batchSize = 5;
-  for (var b = 0; b < entries.length; b += batchSize) {
-    var batch = entries.slice(b, b + batchSize);
-    var prompt =
-      'You are matching extracted lead names to an attendee roster. For each extracted entry, ' +
-      'find the BEST matching roster entry. Consider name variations (Jon/John, Mike/Michael), ' +
-      'company name variations (Wipro Technologies/Wipro Limited), and partial matches.\n\n' +
-      'ROSTER:\n' + JSON.stringify(roster) + '\n\n' +
-      'UNMATCHED ENTRIES:\n' + JSON.stringify(batch.map(function(e) {
-        return { first_name: e.first_name, last_name: e.last_name, account: e.account };
-      })) + '\n\n' +
-      'For each entry, return the best roster match. Output a JSON array with one object per entry:\n' +
-      '[{"entry_index": 0, "best_match_email": "email@example.com", "confidence": 0.85, "reasoning": "..."}]\n' +
-      'If no good match exists (confidence < 0.5), set best_match_email to "" and explain why.';
-
-    var payload = {
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.1,
-        response_mime_type: 'application/json',
-        response_schema: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              entry_index: { type: 'number' },
-              best_match_email: { type: 'string' },
-              confidence: { type: 'number' },
-              reasoning: { type: 'string' }
-            },
-            required: ['entry_index', 'best_match_email', 'confidence']
-          }
-        }
-      }
-    };
-
-    try {
-      var resp = UrlFetchApp.fetch(
-        GEMINI_ENDPOINT_SUMMARY + '?key=' + encodeURIComponent(apiKey),
-        { method: 'post', contentType: 'application/json', muteHttpExceptions: true, payload: JSON.stringify(payload) }
-      );
-
-      if (resp.getResponseCode() !== 200) {
-        console.error('Auto-match Gemini error:', resp.getResponseCode(), resp.getContentText());
-        continue;
-      }
-
-      var root = JSON.parse(resp.getContentText());
-      var candidate = root.candidates && root.candidates[0];
-      if (!candidate || !candidate.content || !candidate.content.parts) continue;
-
-      var parsed = JSON.parse(candidate.content.parts[0].text || '[]');
-      parsed.forEach(function(suggestion) {
-        var idx = suggestion.entry_index;
-        if (idx < 0 || idx >= batch.length) return;
-        var dataRow = batch[idx].row;
-
-        // Find the roster entry to show name
-        var matchName = suggestion.best_match_email || 'No match';
-        if (suggestion.best_match_email) {
-          var rosterEntry = roster.find(function(r) {
-            return r.email.toLowerCase() === suggestion.best_match_email.toLowerCase();
-          });
-          if (rosterEntry) {
-            matchName = rosterEntry.first_name + ' ' + rosterEntry.last_name +
-              ' (' + rosterEntry.account + ') <' + rosterEntry.email + '>';
-          }
-        }
-
-        values[dataRow][sugColIdx] = matchName;
-        values[dataRow][confColIdx] = suggestion.confidence ? suggestion.confidence.toFixed(2) : '0';
-      });
-
-    } catch (e) {
-      console.error('Auto-match batch error:', e);
-    }
-
-    if (b + batchSize < entries.length) {
-      Utilities.sleep(1500);
-    }
-  }
-
-  // Write back
-  var newRange = unmatchedSheet.getRange(1, 1, values.length, values[0].length);
-  newRange.setValues(values);
-
-  // Highlight high-confidence matches green
-  for (var i = 1; i < values.length; i++) {
-    var conf = parseFloat(values[i][confColIdx] || '0');
-    if (conf >= 0.8) {
-      unmatchedSheet.getRange(i + 1, sugColIdx + 1, 1, 2).setBackground('#D9EAD3');
-    } else if (conf >= 0.5) {
-      unmatchedSheet.getRange(i + 1, sugColIdx + 1, 1, 2).setBackground('#FFE599');
-    }
-  }
-
-  SpreadsheetApp.getActive().toast(
-    'Auto-match complete. Review suggestions in "Unmatched Leads" sheet.',
-    'Auto-Match',
-    5
-  );
 }
 
 /**
@@ -1359,100 +1052,6 @@ function retryFailedMessages() {
 }
 
 
-// ---------------------------------------------------------------------------
-// Fuzzy Matching Utilities (pure GAS, no dependencies)
-// ---------------------------------------------------------------------------
-
-/**
- * Levenshtein edit distance between two strings
- */
-function levenshteinDistance(a, b) {
-  if (!a || !b) return Math.max((a || '').length, (b || '').length);
-  var m = a.length, n = b.length;
-  var dp = [];
-  for (var i = 0; i <= m; i++) {
-    dp[i] = [i];
-    for (var j = 1; j <= n; j++) {
-      dp[i][j] = i === 0 ? j : 0;
-    }
-  }
-  for (var i = 1; i <= m; i++) {
-    for (var j = 1; j <= n; j++) {
-      dp[i][j] = a[i - 1] === b[j - 1]
-        ? dp[i - 1][j - 1]
-        : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
-    }
-  }
-  return dp[m][n];
-}
-
-/**
- * Returns 0-1 similarity score between two strings (1 = identical)
- */
-function nameSimilarity(a, b) {
-  if (!a && !b) return 1;
-  if (!a || !b) return 0;
-  var al = a.toLowerCase().trim();
-  var bl = b.toLowerCase().trim();
-  if (al === bl) return 1;
-  var maxLen = Math.max(al.length, bl.length);
-  if (maxLen === 0) return 1;
-  return 1 - (levenshteinDistance(al, bl) / maxLen);
-}
-
-/**
- * Find the single best roster match for an unmatched entry using Levenshtein scoring.
- * Returns { match, score } where score is 0-1 combined similarity.
- */
-function findBestFuzzyMatch(entry, roster) {
-  var bestMatch = null;
-  var bestScore = 0;
-  var firstName = String(entry.first_name || '').toLowerCase().trim();
-  var lastName = String(entry.last_name || '').toLowerCase().trim();
-  var accountNorm = normalizeCompanyName(entry.account || '');
-
-  roster.forEach(function(r) {
-    var nameScore = nameSimilarity(firstName, r.first_name.toLowerCase());
-    var lastScore = lastName ? nameSimilarity(lastName, r.last_name.toLowerCase()) : 0;
-    var companyScore = nameSimilarity(accountNorm, normalizeCompanyName(r.account));
-
-    // Weighted: name match most important, then company, then last name
-    var combined = (nameScore * 0.4) + (companyScore * 0.4) + (lastScore * 0.2);
-    if (combined > bestScore) {
-      bestScore = combined;
-      bestMatch = r;
-    }
-  });
-
-  return { match: bestMatch, score: bestScore };
-}
-
-/**
- * Parse id_card_intel strings like "ID Card 1: {json}\nID Card 2: {json}"
- * into a structured array of objects.
- */
-function parseIdCardIntel(idCardIntel) {
-  if (!idCardIntel) return [];
-  var results = [];
-  var lines = idCardIntel.split(/\r?\n/);
-  lines.forEach(function(line) {
-    var m = line.match(/id\s*card\s*\d*\s*:\s*(\{.*\})/i);
-    if (m) {
-      try {
-        var parsed = JSON.parse(m[1]);
-        results.push({
-          first_name: String(parsed.first_name || '').trim(),
-          last_name: String(parsed.last_name || '').trim(),
-          company_name: String(parsed.company_name || '').trim()
-        });
-      } catch (e) {
-        // Skip unparseable entries
-      }
-    }
-  });
-  return results;
-}
-
 /**
  * Normalize company/account name for fuzzy matching
  */
@@ -1465,23 +1064,6 @@ function normalizeCompanyName(name) {
     .replace(/\s+pvt\.?$/i, '')
     .replace(/\s+llc$/i, '')
     .replace(/\s+corporation$/i, '')
-    .replace(/\s+technologies$/i, '')
-    .replace(/\s+solutions$/i, '')
-    .replace(/\s+systems$/i, '')
-    .replace(/\s+services$/i, '')
-    .replace(/\s+group$/i, '')
-    .replace(/\s+global$/i, '')
-    .replace(/\s+india$/i, '')
-    .replace(/\s+private\s+limited$/i, '')
-    .replace(/\s+pvt\s+ltd\.?$/i, '')
-    .replace(/\s+limited$/i, '')
-    .replace(/\s+co\.?$/i, '')
-    .replace(/\s+consulting$/i, '')
-    .replace(/\s+software$/i, '')
-    .replace(/\s+labs?$/i, '')
-    .replace(/\s+international$/i, '')
-    .replace(/\s+enterprises?$/i, '')
-    .replace(/[,.\s]+$/, '')
     .trim();
 }
 
@@ -1706,13 +1288,11 @@ function buildSlackSummaryWithGemini(roster, messages) {
 function buildGeminiSummaryPayload(roster, batchMessages) {
   const systemInstruction =
     'You are an expert lead intelligence analyst for BrowserStack. Your SOLE task is to extract and structure lead intelligence from Slack conversations.\n\n' +
-    BROWSERSTACK_GLOSSARY +
     '## CRITICAL ANTI-HALLUCINATION RULES\n' +
-    '1. ROSTER IS TRUTH: Use ONLY the attendees present in ROSTER_JSON. Never invent names or companies.\n' +
+    '1. ROSTER IS TRUTH: Use ONLY the attendees present in ROSTER_JSON. Never invent names, emails, or companies.\n' +
     '2. NO GUESSING: If you cannot confidently map a message to a roster entry, SKIP IT entirely.\n' +
     '3. NOISE FILTERING: Skip messages about logistics, lunch, breaks, directions, internal team chat, or anything not about lead conversations.\n' +
-    '4. VERIFY EACH FIELD: Before outputting an entry, verify first_name + account exists in the roster.\n' +
-    '5. DO NOT EXTRACT OR GUESS EMAILS: Email resolution is handled deterministically in post-processing. Only output first_name, last_name, account, ts, spoc, and summary.\n\n' +
+    '4. VERIFY EACH FIELD: Before outputting an entry, verify first_name + account OR email exists in the roster.\n\n' +
     '## CONSOLIDATED LIST DETECTION (CRITICAL)\n' +
     'If a message contains multiple leads in ONE message, extract ALL of them separately:\n' +
     '- Phrases like "Consolidated Leads:", "TCM leads:", "From the [Product] Booth:"\n' +
@@ -1727,21 +1307,11 @@ function buildGeminiSummaryPayload(roster, batchMessages) {
     '- For consolidated lists WITHOUT individual SPOC names → Use message.user as SPOC for all entries\n' +
     '- NEVER put the customer name in the "spoc" field\n\n' +
     '## MISSING DATA HANDLING\n' +
-    '- Do NOT output email addresses — they will be resolved deterministically from the roster\n' +
-    '- If first_name exists: STILL EXTRACT if company/account is known\n' +
+    '- If first_name exists but email is missing: STILL EXTRACT if company/account is known\n' +
     '- If last_name is partial/abbreviated (e.g., "K", "S", "Kumar"): Use as-is, do not invent full names\n' +
     '- If account has " - Parent" suffix: Keep it exactly\n' +
     '- Extract EVERY mention of a company/person combo, even if data is incomplete\n' +
     '- Use id_card_intel to help identify names/companies when main text is vague\n\n' +
-    '## CONSECUTIVE MESSAGE LINKING (CRITICAL)\n' +
-    'Messages are sorted chronologically per SPOC. When a SPOC posts intel about a person in one message\n' +
-    'and an ID card photo (with id_card_intel/parsed_id_cards data) in the next message (or vice versa),\n' +
-    'these refer to the SAME lead. Combine them into ONE entry:\n' +
-    '- If message N mentions "Spoke to someone from Acme" and message N+1 has parsed_id_cards with\n' +
-    '  first_name="John", company_name="Acme", combine them: use the ID card\'s structured name data\n' +
-    '  plus the text intel from the adjacent message.\n' +
-    '- Do NOT create duplicate entries for the same lead across consecutive messages.\n' +
-    '- parsed_id_cards is a structured array extracted from ID card photos — prefer it over raw id_card_intel text.\n\n' +
     '## MESSAGE CLASSIFICATION\n' +
     'PROCESS a message ONLY IF it contains:\n' +
     '- Discussion about a lead\'s technical needs, pain points, or product interest\n' +
@@ -1756,14 +1326,14 @@ function buildGeminiSummaryPayload(roster, batchMessages) {
     '## STRUCTURED OUTPUT FORMAT\n' +
     'Each valid lead interaction becomes ONE entry with this EXACT structure:\n' +
     '{\n' +
+    '  "email": "exact email from roster or empty string",\n' +
     '  "first_name": "exact first_name from roster",\n' +
     '  "last_name": "exact last_name from roster",\n' +
     '  "account": "exact account from roster",\n' +
     '  "ts": "timestamp from message",\n' +
     '  "spoc": "message.user (BrowserStack rep name)",\n' +
     '  "summary": "Spoke to [Representative Name] from [Account]: [intel details]"\n' +
-    '}\n' +
-    'NOTE: Do NOT include an "email" field — email is resolved deterministically from the roster in post-processing.\n\n' +
+    '}\n\n' +
     '## SUMMARY FORMAT REQUIREMENTS\n' +
     'Start every summary with ONE of these patterns:\n' +
     '- "Spoke to [First Last] from [Company]: [intel]" (when name is known)\n' +
@@ -1777,10 +1347,11 @@ function buildGeminiSummaryPayload(roster, batchMessages) {
     '- Urgency signals or deal timing (e.g., "License expires in March", "Actively evaluating")\n' +
     '- Team size, role, or decision-making authority (e.g., "QA Manager with 10-person team")\n\n' +
     '## MAPPING LOGIC (HIERARCHICAL)\n' +
-    '1. Priority 1 (Name + Company): Map to roster entry where first_name AND account match (ignore case, normalize company suffixes)\n' +
-    '2. Priority 2 (First name + Company fuzzy): Match first_name exactly and company name as substring\n' +
-    '3. Priority 3 (Company only): If only company known, create entry for representative with that account\n' +
-    '4. Use id_card_intel as an additional hint for name/company identification\n\n' +
+    '1. Priority 1 (Email exact match): If email mentioned, map to exact email in roster\n' +
+    '2. Priority 2 (Name + Company): Map to roster entry where first_name AND account match (ignore case, normalize company suffixes)\n' +
+    '3. Priority 3 (First name + Company fuzzy): Match first_name exactly and company name as substring\n' +
+    '4. Priority 4 (Company only): If only company known, create entry for representative with that account\n' +
+    '5. Use id_card_intel as an additional hint for name/company identification\n\n' +
     '## CONTEXT EXTRACTION PRIORITY\n' +
     'When extracting intel, prioritize:\n' +
     '1. Product mentions (LCA, TCM, TM, Percy, A11y, Visual Testing, etc.)\n' +
@@ -1793,7 +1364,7 @@ function buildGeminiSummaryPayload(roster, batchMessages) {
     '☑ Can I find this person/company in the roster (or can map with high confidence)?\n' +
     '☑ Does the summary start with "Spoke to..."?\n' +
     '☑ Is the intel specific and actionable?\n' +
-    '☑ Am I using the EXACT name/company from the roster (no variations)?\n' +
+    '☑ Am I using the EXACT name/email/company from the roster (no variations)?\n' +
     '☑ If this is a consolidated list, did I extract EACH person as a SEPARATE entry?\n' +
     '☑ Is the "spoc" field the BrowserStack employee, NOT the customer?\n\n' +
     'If ANY checkbox fails → SKIP this entry.\n\n' +
@@ -1802,17 +1373,12 @@ function buildGeminiSummaryPayload(roster, batchMessages) {
   const rosterJson = JSON.stringify(roster);
   const messagesJson = JSON.stringify(
     batchMessages.map(function (m) {
-      var msg = {
+      return {
         ts: m.ts,
         user: m.user,
         text: m.text,
         id_card_intel: m.id_card_intel
       };
-      // Include pre-parsed ID card data for easier Gemini consumption
-      if (m.id_card_intel) {
-        msg.parsed_id_cards = parseIdCardIntel(m.id_card_intel);
-      }
-      return msg;
     })
   );
 
@@ -1834,6 +1400,10 @@ function buildGeminiSummaryPayload(roster, batchMessages) {
     items: {
       type: 'object',
       properties: {
+        email: {
+          type: 'string',
+          description: 'Exact email from roster, or empty string if unknown'
+        },
         first_name: {
           type: 'string',
           description: 'Exact first_name from roster'
@@ -2808,7 +2378,7 @@ function callGeminiBatchClassification(prompt, apiKey) {
 /**
  * Maps emails from Attendance tab to the Current Sheet based on tiered logic.
  */
-function runTieredEmailMapping() {
+function mapParticipantEmails() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const attendanceSheet = ss.getSheetByName("Attendance");
   const targetSheet = ss.getActiveSheet(); 

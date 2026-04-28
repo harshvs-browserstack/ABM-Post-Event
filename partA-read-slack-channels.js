@@ -1,4 +1,9 @@
 // Code.gs – Slack Transcript + Gemini ID card extraction (with user names)
+//
+// Configuration Storage:
+// - Channel-sheet mappings & sync state → Config sheet (tab in DEFAULT_TRANSCRIPT_SPREADSHEET_ID)
+// - Event deduplication state → PropertiesService (time-limited, internal)
+// - Secrets (tokens, API keys) → PropertiesService (secure)
 
 const DEFAULT_TRANSCRIPT_SPREADSHEET_ID = '1SKPYcbjgSg7YPwSw2I5VBBurSFaYYjU1USvLfY9gvlA';
 const MAX_MESSAGES_PER_RUN = 400;
@@ -30,6 +35,7 @@ const userNameCache = {};
 // ─── SheetLogger ──────────────────────────────────────────────────────────────
 
 const LOGGING_ENABLED  = true;   // set false in prod to silence sheet logs
+const LOG_SHEET_NAME   = 'Logs';
 const LOG_BUFFER       = [];
 const LOG_FLUSH_SIZE   = 20;
 
@@ -213,15 +219,40 @@ function getSheetFromUrl(url) {
 }
 
 function getDefaultTranscriptSheetForChannel(channelId) {
-  const ss          = SpreadsheetApp.openById(DEFAULT_TRANSCRIPT_SPREADSHEET_ID);
+  const ss = SpreadsheetApp.openById(DEFAULT_TRANSCRIPT_SPREADSHEET_ID);
+
+  // Check if we have a config mapping for this channel
+  let config = getConfigRow(channelId, DEFAULT_TRANSCRIPT_SPREADSHEET_ID);
+
+  if (config) {
+    // Use existing mapped sheet
+    sheetLog('INFO', 'getDefaultTranscriptSheetForChannel: found existing config for channel=' +
+      channelId + ' | sheetName=' + config.sheetName);
+    let sheet = ss.getSheetByName(config.sheetName);
+    if (!sheet) {
+      // Config exists but sheet was deleted; recreate it
+      sheetLog('WARN', 'getDefaultTranscriptSheetForChannel: sheet ' + config.sheetName +
+        ' not found, recreating');
+      sheet = ss.insertSheet(config.sheetName);
+      sheet.appendRow(['timestamp', 'user', 'text', 'thread_ts', 'attachments', 'id_card_intel']);
+    }
+    return { ss, sheet, name: config.sheetName };
+  }
+
+  // No config exists; create new sheet and register it
   const channelName = getSlackChannelName(channelId);
   const sheetName   = `${channelName}-transcript`;
   let   sheet       = ss.getSheetByName(sheetName);
   if (!sheet) {
     sheet = ss.insertSheet(sheetName);
     sheet.appendRow(['timestamp', 'user', 'text', 'thread_ts', 'attachments', 'id_card_intel']);
-    sheetLog('INFO', 'getDefaultTranscriptSheetForChannel: created sheet ' + sheetName);
   }
+
+  // Add config row to track this channel-sheet mapping
+  setConfigRow(channelId, DEFAULT_TRANSCRIPT_SPREADSHEET_ID, sheetName, null);
+  sheetLog('INFO', 'getDefaultTranscriptSheetForChannel: created sheet ' + sheetName +
+    ' and registered in Config');
+
   return { ss, sheet, name: sheetName };
 }
 
@@ -347,7 +378,6 @@ function enrichMessagesWithIdCards(messages) {
     const responses = UrlFetchApp.fetchAll(batchRequests);
 
     responses.forEach(function (resp, idx) {
-      const t = batchTasks[idx];
       try {
         if (resp.getResponseCode() !== 200) {
           sheetLog('ERROR', 'enrichMessagesWithIdCards: Gemini HTTP ' +
@@ -540,16 +570,271 @@ function writeTranscriptToSheet(sheet, messages) {
   return rows.length;
 }
 
-// ─── Last synced ts ───────────────────────────────────────────────────────────
+// ─── Config sheet management ─────────────────────────────────────────────────
+
+const CONFIG_SHEET_NAME = 'Config';
+
+/**
+ * Ensures the Config sheet exists with headers.
+ */
+function ensureConfigSheet() {
+  try {
+    const ss    = SpreadsheetApp.openById(DEFAULT_TRANSCRIPT_SPREADSHEET_ID);
+    let   sheet = ss.getSheetByName(CONFIG_SHEET_NAME);
+    if (!sheet) {
+      sheet = ss.insertSheet(CONFIG_SHEET_NAME);
+      sheet.appendRow(['channelId', 'spreadsheetId', 'sheetName', 'lastSyncedTs']);
+      sheetLog('INFO', 'ensureConfigSheet: created Config sheet');
+    }
+    return sheet;
+  } catch (e) {
+    sheetLog('ERROR', 'ensureConfigSheet: ' + e.message);
+    return null;
+  }
+}
+
+/**
+ * Reads config for a channel-sheet pair from the Config sheet.
+ * Returns { channelId, spreadsheetId, sheetName, lastSyncedTs } or null if not found.
+ */
+function getConfigRow(channelId, sheetId) {
+  try {
+    const sheet = ensureConfigSheet();
+    if (!sheet) return null;
+
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      if (row[0] === channelId && row[1] === sheetId) {
+        return {
+          channelId: row[0],
+          spreadsheetId: row[1],
+          sheetName: row[2],
+          lastSyncedTs: row[3] || null
+        };
+      }
+    }
+    return null;
+  } catch (e) {
+    sheetLog('ERROR', 'getConfigRow: ' + e.message);
+    return null;
+  }
+}
+
+/**
+ * Creates or updates a config row for a channel-sheet pair.
+ */
+function setConfigRow(channelId, sheetId, sheetName, lastSyncedTs) {
+  try {
+    const sheet = ensureConfigSheet();
+    if (!sheet) return;
+
+    const data = sheet.getDataRange().getValues();
+    let   found = false;
+
+    // Update existing row
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === channelId && data[i][1] === sheetId) {
+        sheet.getRange(i + 1, 4).setValue(lastSyncedTs || '');
+        sheetLog('INFO', 'setConfigRow: updated row ' + (i + 1) +
+          ' | channel=' + channelId + ' | lastSyncedTs=' + lastSyncedTs);
+        found = true;
+        break;
+      }
+    }
+
+    // Insert new row if not found
+    if (!found) {
+      sheet.appendRow([channelId, sheetId, sheetName, lastSyncedTs || '']);
+      sheetLog('INFO', 'setConfigRow: inserted new row | channel=' + channelId +
+        ' | sheet=' + sheetName + ' | lastSyncedTs=' + lastSyncedTs);
+    }
+  } catch (e) {
+    sheetLog('ERROR', 'setConfigRow: ' + e.message);
+  }
+}
+
+// ─── Last synced ts (now using Config sheet) ───────────────────────────────────
 
 function getLastSyncedTs(channelId, sheetId) {
-  const key = `lastSyncedTs:${channelId}:${sheetId}`;
-  return PropertiesService.getScriptProperties().getProperty(key) || null;
+  const config = getConfigRow(channelId, sheetId);
+  return config ? config.lastSyncedTs : null;
 }
 
 function setLastSyncedTs(channelId, sheetId, ts) {
-  const key = `lastSyncedTs:${channelId}:${sheetId}`;
-  PropertiesService.getScriptProperties().setProperty(key, ts);
+  // First read the config to get the sheetName, then update
+  const config = getConfigRow(channelId, sheetId);
+  if (config) {
+    setConfigRow(channelId, sheetId, config.sheetName, ts);
+  } else {
+    // If no config exists yet, we'll create one (should have been created by now)
+    sheetLog('WARN', 'setLastSyncedTs: no config found for channel=' + channelId +
+      ' | sheetId=' + sheetId);
+  }
+}
+
+/**
+ * Reset sync timestamps for a specific sheet.
+ * Run with target sheet ID, e.g.: clearSyncTimestampsForSheet('1OuraOJpqEg4Wja74Mp067yys0kMznp3_egRHeUHx7Lw')
+ */
+function clearSyncTimestampsForSheet(sheetId) {
+  try {
+    const sheet = ensureConfigSheet();
+    if (!sheet) return;
+
+    const data = sheet.getDataRange().getValues();
+    const rowsToDelete = [];
+
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][1] === sheetId) {
+        rowsToDelete.push(i + 1);
+      }
+    }
+
+    // Delete in reverse order to avoid shifting indices
+    for (let i = rowsToDelete.length - 1; i >= 0; i--) {
+      sheet.deleteRow(rowsToDelete[i]);
+      console.log('Deleted row: ' + rowsToDelete[i]);
+    }
+
+    sheetLog('INFO', 'clearSyncTimestampsForSheet: cleared ' + rowsToDelete.length +
+      ' row(s) for sheetId=' + sheetId);
+  } catch (e) {
+    sheetLog('ERROR', 'clearSyncTimestampsForSheet: ' + e.message);
+  }
+}
+
+/**
+ * Clear all config for a specific channel.
+ * Run with channel ID, e.g.: clearChannelConfig('C01234567')
+ */
+function clearChannelConfig(channelId) {
+  try {
+    const sheet = ensureConfigSheet();
+    if (!sheet) return;
+
+    const data = sheet.getDataRange().getValues();
+    const rowsToDelete = [];
+
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === channelId) {
+        rowsToDelete.push(i + 1);
+      }
+    }
+
+    for (let i = rowsToDelete.length - 1; i >= 0; i--) {
+      sheet.deleteRow(rowsToDelete[i]);
+      console.log('Deleted row: ' + rowsToDelete[i]);
+    }
+
+    sheetLog('INFO', 'clearChannelConfig: cleared ' + rowsToDelete.length +
+      ' row(s) for channelId=' + channelId);
+  } catch (e) {
+    sheetLog('ERROR', 'clearChannelConfig: ' + e.message);
+  }
+}
+
+/**
+ * MIGRATION FUNCTION: One-time use.
+ * Copies all lastSyncedTs mappings from PropertiesService to Config sheet,
+ * then deletes them from PropertiesService.
+ *
+ * Call this once after deploying the new Config sheet code:
+ *   migratePropertiesServiceToConfigSheet()
+ */
+function migratePropertiesServiceToConfigSheet() {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const all   = props.getProperties();
+
+    const configSheet = ensureConfigSheet();
+    if (!configSheet) {
+      console.error('migratePropertiesServiceToConfigSheet: could not access Config sheet');
+      return;
+    }
+
+    let migrated = 0;
+    let errors   = 0;
+
+    console.log('migratePropertiesServiceToConfigSheet: scanning properties...');
+
+    // Iterate over all properties looking for lastSyncedTs:channelId:sheetId format
+    Object.keys(all).forEach(function (key) {
+      if (!key.startsWith('lastSyncedTs:')) return;
+
+      try {
+        // Parse key: lastSyncedTs:channelId:sheetId
+        const parts = key.split(':');
+        if (parts.length !== 3) {
+          console.warn('migratePropertiesServiceToConfigSheet: skipping malformed key ' + key);
+          return;
+        }
+
+        const channelId = parts[1];
+        const sheetId   = parts[2];
+        const ts        = all[key];
+
+        // Check if this mapping already exists in Config sheet
+        const existing = getConfigRow(channelId, sheetId);
+        if (existing) {
+          console.log('migratePropertiesServiceToConfigSheet: config already exists for ' +
+            channelId + ':' + sheetId + ', skipping');
+          return;
+        }
+
+        // Try to get the sheet name from the target spreadsheet
+        let sheetName = 'Unknown Sheet';
+        try {
+          const ss = SpreadsheetApp.openById(sheetId);
+          // Assume the default transcript sheet pattern or first sheet
+          sheetName = ss.getSheetByName('Slack Transcript')?.getName() || 'Slack Transcript';
+        } catch (e) {
+          console.warn('migratePropertiesServiceToConfigSheet: could not open sheet ' + sheetId +
+            ', using default name');
+        }
+
+        // Insert into Config sheet
+        setConfigRow(channelId, sheetId, sheetName, ts);
+        console.log('migratePropertiesServiceToConfigSheet: migrated ' + channelId +
+          ':' + sheetId + ' | ts=' + ts);
+        migrated++;
+      } catch (e) {
+        console.error('migratePropertiesServiceToConfigSheet: error processing key ' + key +
+          ' – ' + e.message);
+        errors++;
+      }
+    });
+
+    console.log('migratePropertiesServiceToConfigSheet: migrated ' + migrated +
+      ' mapping(s), errors=' + errors);
+
+    // Only delete properties after successful migration
+    if (migrated > 0) {
+      console.log('migratePropertiesServiceToConfigSheet: deleting migrated keys from PropertiesService...');
+      let deleted = 0;
+
+      Object.keys(all).forEach(function (key) {
+        if (!key.startsWith('lastSyncedTs:')) return;
+        try {
+          props.deleteProperty(key);
+          console.log('migratePropertiesServiceToConfigSheet: deleted ' + key);
+          deleted++;
+        } catch (e) {
+          console.error('migratePropertiesServiceToConfigSheet: failed to delete ' + key +
+            ' – ' + e.message);
+        }
+      });
+
+      console.log('migratePropertiesServiceToConfigSheet: deleted ' + deleted +
+        ' property(ies) from PropertiesService');
+    }
+
+    sheetLog('INFO', 'migratePropertiesServiceToConfigSheet: complete | migrated=' +
+      migrated + ' | errors=' + errors);
+
+  } catch (e) {
+    console.error('migratePropertiesServiceToConfigSheet: uncaught error – ' + e.message);
+  }
 }
 
 // ─── Fetch messages ───────────────────────────────────────────────────────────
@@ -601,8 +886,11 @@ function fetchRecentMessagesFromSlackChannel(channelId, limit, oldestTs, exclude
   sheetLog('INFO', 'fetchRecentMessagesFromSlackChannel: ' + messages.length + ' messages after filter');
 
   // Fetch thread replies for any threaded messages
-  const threadParents = messages.filter(m => m.reply_count > 0).slice(0, MAX_THREAD_FETCHES);
-  // const threadParents = messages.filter(m => m.reply_count > 0);
+  const allThreadParents = messages.filter(m => m.reply_count > 0);
+  const threadParents = allThreadParents.slice(0, MAX_THREAD_FETCHES);
+  sheetLog('INFO', 'fetchRecentMessages: total messages=' + messages.length +
+    ' | threadParents found=' + allThreadParents.length +
+    ' | fetching=' + threadParents.length + ' (cap=' + MAX_THREAD_FETCHES + ')');
   threadParents.forEach(function(parent) {
     const resp = UrlFetchApp.fetch('https://slack.com/api/conversations.replies', {
       method: 'post',
